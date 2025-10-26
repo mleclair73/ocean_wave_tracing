@@ -59,7 +59,8 @@ class Wave_tracing():
         self.domain_Y0 = domain_Y0 # bottom
         self.domain_YN = domain_YN # top
         self.T = T
-
+        self.min_depth = 0
+        
         self.temporal_evolution = temporal_evolution
         self.debug = DEBUG
 
@@ -283,6 +284,7 @@ class Wave_tracing():
                                             [left, right, top, bottom]
                 ipx (float, array of floats): initial position x
                 ipy (float, array of floats): initial position y
+                minimum_depth (float): depth for early stop
         """
 
         nb_wave_rays = self.nb_wave_rays
@@ -370,6 +372,9 @@ class Wave_tracing():
 
         #Check the CFL condition
         self.check_CFL(cg=np.nanmax(self.ray_cg[:,0]),max_speed=np.nanmax(np.sqrt(self.U**2+self.V**2)))
+        
+        if 'min_depth' in kwargs:
+            self.min_depth = kwargs['min_depth']
 
 
     def find_nearest_fast(self, array, values):
@@ -390,9 +395,10 @@ class Wave_tracing():
         
         return indices    
     
-    def solve(self, solver=RungeKutta4):
+    def solve(self, solver=RungeKutta4, early_stop=False):
         """ Solve the geometrical optics equations numerically by means of the
-            method of characteristics
+            method of characteristics. Optionally stops individual rays early 
+            if they hit land or exit the domain.
         """
 
         if not callable(solver):
@@ -409,7 +415,7 @@ class Wave_tracing():
         U = self.U.data
         V = self.V.data
 
-        #Compute velocity gradients
+        # Compute velocity gradients
         dudx = self.U.differentiate('x')
         dudy = self.U.differentiate('y')
         dvdx = self.V.differentiate('x')
@@ -421,113 +427,176 @@ class Wave_tracing():
         nt = self.nt
         velocity_idt = self.velocity_idt
 
-        counter=0
-        t = np.linspace(0,self.T,nt)
+        # Track which rays are still active (only if early_stop is enabled)
+        if early_stop:
+            ray_active = np.ones(self.nb_wave_rays, dtype=bool)
 
-        for n in range(0,nt-1):
+        counter = 0
+        t = np.linspace(0, self.T, nt)
 
-            # find indices for each wave ray
-            idxs = self.find_nearest_fast(x, ray_x[:, n])
-            idys = self.find_nearest_fast(y, ray_y[:, n])            
-            ray_depth = self.d.values[idys,idxs]
-
-            self.ray_depth[:,n] = ray_depth
-
-            self.ray_U[:,n] = self.U.values[velocity_idt[n], idys, idxs]
-            self.ray_V[:,n] = self.V.values[velocity_idt[n], idys, idxs]
-
-            self.ray_dudx[:,n] = dudx.values[velocity_idt[n], idys, idxs]
-            self.ray_dvdy[:,n] = dvdy.values[velocity_idt[n], idys, idxs]
-            self.ray_dudy[:,n] = dudy.values[velocity_idt[n], idys, idxs]
-            self.ray_dvdx[:,n] = dvdx.values[velocity_idt[n], idys, idxs]
-            #logger.info() # CHECK FOR BOTH U AND V
+        for n in range(0, nt - 1):
             
-            self.d_cx[:,n] = self.grad_c_x(ray_k[:,n], idxs, idys, ray_depth)
-            self.d_cy[:,n] = self.grad_c_y(ray_k[:,n], idxs, idys, ray_depth)
+            # Get active rays if early stopping is enabled
+            if early_stop:
+                active_indices = np.where(ray_active)[0]
+                if len(active_indices) == 0:
+                    logger.info(f'All rays terminated by timestep {n}')
+                    break
+                idxs = self.find_nearest_fast(x, ray_x[active_indices, n])
+                idys = self.find_nearest_fast(y, ray_y[active_indices, n])
+                ray_depth = self.d.values[idys, idxs]
+            else:
+                active_indices = slice(None)  # All rays
+                idxs = self.find_nearest_fast(x, ray_x[:, n])
+                idys = self.find_nearest_fast(y, ray_y[:, n])
+                ray_depth = self.d.values[idys, idxs]
+
+            self.ray_depth[active_indices, n] = ray_depth
+
+            self.ray_U[active_indices, n] = self.U.values[velocity_idt[n], idys, idxs]
+            self.ray_V[active_indices, n] = self.V.values[velocity_idt[n], idys, idxs]
+
+            self.ray_dudx[active_indices, n] = dudx.values[velocity_idt[n], idys, idxs]
+            self.ray_dvdy[active_indices, n] = dvdy.values[velocity_idt[n], idys, idxs]
+            self.ray_dudy[active_indices, n] = dudy.values[velocity_idt[n], idys, idxs]
+            self.ray_dvdx[active_indices, n] = dvdx.values[velocity_idt[n], idys, idxs]
+
+            self.d_cx[active_indices, n] = self.grad_c_x(ray_k[active_indices, n], idxs, idys, ray_depth)
+            self.d_cy[active_indices, n] = self.grad_c_y(ray_k[active_indices, n], idxs, idys, ray_depth)
 
             #======================================================
             ### numerical integration of the wave ray equations ###
             #======================================================
 
             # Compute group velocity
-            ray_cg[:,n] = self.c_intrinsic(ray_k[:,n],d=ray_depth,group_velocity=True)
+            ray_cg[active_indices, n] = self.c_intrinsic(ray_k[active_indices, n], d=ray_depth, group_velocity=True)
 
             # ADVECTION
-            f_adv = Advection(cg=ray_cg[:,n], k=ray_k[:,n], kx=ray_kx[:,n], U=U[velocity_idt[n],idys,idxs])
-            ray_x[:,n+1] = solver.advance(u=ray_x[:,n], f=f_adv,k=n,t=t) # NOTE: this k is a counter and not wave number
+            f_adv = Advection(cg=ray_cg[active_indices, n], k=ray_k[active_indices, n], 
+                            kx=ray_kx[active_indices, n], U=U[velocity_idt[n], idys, idxs])
+            ray_x[active_indices, n + 1] = solver.advance(u=ray_x[active_indices, n], f=f_adv, k=n, t=t)
 
-            f_adv = Advection(cg=ray_cg[:,n], k=ray_k[:,n], kx=ray_ky[:,n], U=V[velocity_idt[n],idys,idxs])
-            ray_y[:,n+1] = solver.advance(u=ray_y[:,n], f=f_adv, k=n, t=t)# NOTE: this k is a counter and not wave number
-
+            f_adv = Advection(cg=ray_cg[active_indices, n], k=ray_k[active_indices, n], 
+                            kx=ray_ky[active_indices, n], U=V[velocity_idt[n], idys, idxs])
+            ray_y[active_indices, n + 1] = solver.advance(u=ray_y[active_indices, n], f=f_adv, k=n, t=t)
 
             # EVOLUTION IN WAVE NUMBER
-            self.dsigma_dx[:,n] = self.dsigma_x(ray_k[:,n], idxs, idys,ray_depth)
-            self.dsigma_dy[:,n] = self.dsigma_y(ray_k[:,n], idxs, idys,ray_depth)
+            self.dsigma_dx[active_indices, n] = self.dsigma_x(ray_k[active_indices, n], idxs, idys, ray_depth)
+            self.dsigma_dy[active_indices, n] = self.dsigma_y(ray_k[active_indices, n], idxs, idys, ray_depth)
 
-            f_wave_nb = WaveNumberEvolution(d_sigma=self.dsigma_dx[:,n], kx=ray_kx[:,n], ky=ray_ky[:,n],
-                                               dUkx=self.ray_dudx[:,n], 
-                                               dUky=self.ray_dvdx[:,n])
-            
-            ray_kx[:,n+1] = solver.advance(u=ray_kx[:,n], f=f_wave_nb,k=n, t=t)# NOTE: this "k" is a counter and not wave number
+            f_wave_nb = WaveNumberEvolution(d_sigma=self.dsigma_dx[active_indices, n], 
+                                        kx=ray_kx[active_indices, n], ky=ray_ky[active_indices, n],
+                                        dUkx=self.ray_dudx[active_indices, n], 
+                                        dUky=self.ray_dvdx[active_indices, n])
+            ray_kx[active_indices, n + 1] = solver.advance(u=ray_kx[active_indices, n], f=f_wave_nb, k=n, t=t)
 
-            f_wave_nb = WaveNumberEvolution(d_sigma=self.dsigma_dy[:,n], kx=ray_kx[:,n], ky=ray_ky[:,n],
-                                               dUkx=self.ray_dudy[:,n], 
-                                               dUky=self.ray_dvdy[:,n])
-            
-            ray_ky[:,n+1] = solver.advance(u=ray_ky[:,n], f=f_wave_nb, k=n, t=t)# NOTE: this "k" is a counter and not wave number
+            f_wave_nb = WaveNumberEvolution(d_sigma=self.dsigma_dy[active_indices, n], 
+                                        kx=ray_kx[active_indices, n], ky=ray_ky[active_indices, n],
+                                        dUkx=self.ray_dudy[active_indices, n], 
+                                        dUky=self.ray_dvdy[active_indices, n])
+            ray_ky[active_indices, n + 1] = solver.advance(u=ray_ky[active_indices, n], f=f_wave_nb, k=n, t=t)
 
             # Compute wave number k
-            ray_k[:,n+1] = np.sqrt(ray_kx[:,n+1]**2+ray_ky[:,n+1]**2)
+            ray_k[active_indices, n + 1] = np.sqrt(ray_kx[active_indices, n + 1]**2 + 
+                                                ray_ky[active_indices, n + 1]**2)
 
             # THETA
-            ray_theta[:,n+1] = np.arctan2(ray_ky[:,n+1],ray_kx[:,n+1])
+            ray_theta[active_indices, n + 1] = np.arctan2(ray_ky[active_indices, n + 1], 
+                                                        ray_kx[active_indices, n + 1])
 
-            #keep angles between 0 and 2pi
-            ray_theta[:,n+1] = np.mod(ray_theta[:,n+1],(2*np.pi))
+            # Keep angles between 0 and 2pi
+            ray_theta[active_indices, n + 1] = np.mod(ray_theta[active_indices, n + 1], (2 * np.pi))
+
+            # Early stopping check
+            if early_stop:
+                # Check domain boundaries
+                out_of_bounds = (
+                    (ray_x[active_indices, n + 1] < self.domain_X0) |
+                    (ray_x[active_indices, n + 1] > self.domain_XN) |
+                    (ray_y[active_indices, n + 1] < self.domain_Y0) |
+                    (ray_y[active_indices, n + 1] > self.domain_YN)
+                )
+                
+                # Check for hitting land (depth <= 0)
+                next_idxs = self.find_nearest_fast(x, ray_x[active_indices, n + 1])
+                next_idys = self.find_nearest_fast(y, ray_y[active_indices, n + 1])
+                next_depths = self.d.values[next_idys, next_idxs]
+                hit_land = next_depths <= self.min_depth
+                
+                # Deactivate rays
+                rays_to_deactivate = out_of_bounds | hit_land
+                
+                if np.any(rays_to_deactivate):
+                    deactivated_ray_ids = active_indices[rays_to_deactivate]
+                    ray_active[deactivated_ray_ids] = False
+                    logger.info(f'Timestep {n}: Deactivated {np.sum(rays_to_deactivate)} rays. '
+                            f'{np.sum(ray_active)} rays still active.')
+                    
+                    # Set remaining values to NaN for deactivated rays
+                    ray_x[deactivated_ray_ids, n + 1:] = np.nan
+                    ray_y[deactivated_ray_ids, n + 1:] = np.nan
+                    ray_k[deactivated_ray_ids, n + 1:] = np.nan
+                    ray_kx[deactivated_ray_ids, n + 1:] = np.nan
+                    ray_ky[deactivated_ray_ids, n + 1:] = np.nan
+                    ray_theta[deactivated_ray_ids, n + 1:] = np.nan
 
             counter += 1
 
         ###
-        # Fill last values in ray_depth, ray_U, ray_V, and ray gradients
+        # Fill last values
         ###
-        # find indices for each wave ray
-        idxs = self.find_nearest_fast(x, ray_x[:, n])  # All rays at once
-        idys = self.find_nearest_fast(y, ray_y[:, n])
-        
-        self.ray_depth[:,n+1] =self.d.values[idys,idxs] 
+        if early_stop:
+            active_indices = np.where(ray_active)[0]
+            if len(active_indices) == 0:
+                active_indices = np.array([], dtype=int)
+        else:
+            active_indices = slice(None)
 
-        self.ray_U[:,n+1] = self.U.values[velocity_idt[n+1], idys, idxs]
-        self.ray_V[:,n+1] = self.V.values[velocity_idt[n+1], idys, idxs]
-        #self.ray_U[:,n+1] = self.U.isel(time=velocity_idt[n+1], y=xa.DataArray(idys,dims='z'),x=xa.DataArray(idxs,dims='z'))
-        #self.ray_V[:,n+1] = self.V.isel(time=velocity_idt[n+1], y=xa.DataArray(idys,dims='z'),x=xa.DataArray(idxs,dims='z'))
-        
-        self.ray_dudx[:,n+1] = dudx.values[velocity_idt[n+1], idys, idxs]
-        self.ray_dvdy[:,n+1] = dvdy.values[velocity_idt[n+1], idys, idxs]
-        self.ray_dudy[:,n+1] = dudy.values[velocity_idt[n+1], idys, idxs]
-        self.ray_dvdx[:,n+1] = dvdx.values[velocity_idt[n+1], idys, idxs]
-        
-        self.dsigma_dx[:,n+1] = self.dsigma_x(ray_k[:,n+1], idxs, idys,self.ray_depth[:,n+1])
-        self.dsigma_dy[:,n+1] = self.dsigma_y(ray_k[:,n+1], idxs, idys,self.ray_depth[:,n+1])
+        if early_stop and len(active_indices) > 0 or not early_stop:
+            idxs = self.find_nearest_fast(x, ray_x[active_indices, n])
+            idys = self.find_nearest_fast(y, ray_y[active_indices, n])
+            
+            self.ray_depth[active_indices, n + 1] = self.d.values[idys, idxs]
 
+            self.ray_U[active_indices, n + 1] = self.U.values[velocity_idt[n + 1], idys, idxs]
+            self.ray_V[active_indices, n + 1] = self.V.values[velocity_idt[n + 1], idys, idxs]
 
-        self.d_cx[:,n+1] = self.grad_c_x(ray_k[:,n+1], idxs, idys, self.ray_depth[:,n+1])
-        self.d_cy[:,n+1] = self.grad_c_y(ray_k[:,n+1], idxs, idys, self.ray_depth[:,n+1])
+            self.ray_dudx[active_indices, n + 1] = dudx.values[velocity_idt[n + 1], idys, idxs]
+            self.ray_dvdy[active_indices, n + 1] = dvdy.values[velocity_idt[n + 1], idys, idxs]
+            self.ray_dudy[active_indices, n + 1] = dudy.values[velocity_idt[n + 1], idys, idxs]
+            self.ray_dvdx[active_indices, n + 1] = dvdx.values[velocity_idt[n + 1], idys, idxs]
 
-        ray_cg[:,n+1] = self.c_intrinsic(ray_k[:,n],d=self.ray_depth[:,n+1],group_velocity=True)
+            self.dsigma_dx[active_indices, n + 1] = self.dsigma_x(ray_k[active_indices, n + 1], 
+                                                                idxs, idys, self.ray_depth[active_indices, n + 1])
+            self.dsigma_dy[active_indices, n + 1] = self.dsigma_y(ray_k[active_indices, n + 1], 
+                                                                idxs, idys, self.ray_depth[active_indices, n + 1])
 
+            self.d_cx[active_indices, n + 1] = self.grad_c_x(ray_k[active_indices, n + 1], 
+                                                            idxs, idys, self.ray_depth[active_indices, n + 1])
+            self.d_cy[active_indices, n + 1] = self.grad_c_y(ray_k[active_indices, n + 1], 
+                                                            idxs, idys, self.ray_depth[active_indices, n + 1])
+
+            ray_cg[active_indices, n + 1] = self.c_intrinsic(ray_k[active_indices, n], 
+                                                            d=self.ray_depth[active_indices, n + 1], 
+                                                            group_velocity=True)
 
         self.dudy = dudy
         self.dudx = dudx
         self.dvdy = dvdy
         self.dvdx = dvdx
         self.ray_k = ray_k
-        self.ray_kx= ray_kx
-        self.ray_ky= ray_ky
-        self.ray_x= ray_x
-        self.ray_y= ray_y
+        self.ray_kx = ray_kx
+        self.ray_ky = ray_ky
+        self.ray_x = ray_x
+        self.ray_y = ray_y
         self.ray_theta = ray_theta
         self.ray_cg = ray_cg
-        logging.info('Stoppet at time idt: {}'.format(velocity_idt[n]))
+        
+        if early_stop:
+            self.ray_active = ray_active
+            logging.info(f'Final active rays: {np.sum(ray_active)}/{self.nb_wave_rays}')
+        
+        logging.info(f'Stopped at time idt: {velocity_idt[n]}')
 
     def to_ds(self,**kwargs):
         """Convert wave ray information to xarray object"""
