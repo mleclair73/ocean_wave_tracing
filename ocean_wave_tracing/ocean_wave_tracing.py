@@ -587,31 +587,63 @@ class Wave_tracing():
         #>>> wt.solve()
         #>>> wt.ray_density(x_increment=20,y_increment=20)
         """
-        xx,yy=np.meshgrid(self.x[::x_increment],self.y[::y_increment])
-        hm = np.zeros(xx.shape) # heatmap
+        # Create grid
+        xs = self.x[::x_increment]
+        ys = self.y[::y_increment]
+        xx, yy = np.meshgrid(xs, ys)
+        
         xs = xx[0]
-        ys = yy[:,0]
+        ys = yy[:, 0]
+        
+        n_y_bins = len(ys) - 1
+        n_x_bins = len(xs) - 1
+        hm = np.zeros((n_y_bins, n_x_bins))
 
-        counter=0
-        for i in range(0,self.nb_wave_rays):
-            for idx in range(len(xs)-1):
-                x0, xn = xs[idx],xs[idx+1]
-                for idy in range(len(ys)-1):
-                    y0, yn = ys[idy],ys[idy+1]
-                    counter+=1
-                    valid_x = (self.ray_x[i,:]>x0)*(self.ray_x[i,:]<xn)
-                    if (np.any((self.ray_y[i,:][valid_x]>y0)*(self.ray_y[i,:][valid_x]<yn))):
-                        hm[idy,idx]+=1
-
+        
+        # Flatten ray coordinates
+        ray_x_flat = self.ray_x.ravel()
+        ray_y_flat = self.ray_y.ravel()
+        
+        # Digitize returns bin indices (1-indexed, 0 for out-of-bounds).
+        x_indices = np.digitize(ray_x_flat, xs) - 1
+        y_indices = np.digitize(ray_y_flat, ys) - 1
+        
+        # Filter valid indices (within bounds)
+        valid_mask = (
+            (x_indices >= 0) & (x_indices < n_x_bins) &
+            (y_indices >= 0) & (y_indices < n_y_bins)
+        )
+        
+        x_indices_valid = x_indices[valid_mask]
+        y_indices_valid = y_indices[valid_mask]
+        
+        # Count occurrences in each bin using bincount with 2D indexing
+        # Convert 2D indices to 1D
+        flat_indices = y_indices_valid * n_x_bins + x_indices_valid
+        counts = np.bincount(flat_indices, minlength=n_y_bins * n_x_bins)
+        
+        # Reshape back to 2D
+        hm = counts.reshape(n_y_bins, n_x_bins)
+        
         if plot:
-            plt.pcolormesh(xx,yy,hm)
-            plt.colorbar()
-            for i in range(0,self.nb_wave_rays):
-                plt.plot(self.ray_x[i,:],self.ray_y[i,:],'-r',alpha=0.3)
-            plt.scatter(xx,yy);plt.show()
-
-        return xx,yy,hm
-
+            plt.figure(figsize=(10, 8))
+            
+            plt.pcolormesh(xs, ys, hm, cmap='viridis', shading='flat')
+            plt.colorbar(label='Ray Density')
+            
+            # Plot individual rays
+            for i in range(self.nb_wave_rays):
+                plt.plot(self.ray_x[i, :], self.ray_y[i, :], '-r', alpha=0.3, linewidth=0.5)
+            
+            plt.xlabel('X')
+            plt.ylabel('Y')
+            plt.title('Wave Ray Density (Vectorized)')
+            plt.xlim(xs[0], xs[-1])
+            plt.ylim(ys[0], ys[-1])
+            plt.show()
+        
+        return xx, yy, hm
+    
     def to_latlon(self, proj4):
         """ Method for reprojecting wave rays to latitude/longitude values
 
