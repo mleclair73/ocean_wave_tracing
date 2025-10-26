@@ -399,11 +399,11 @@ class Wave_tracing():
             raise TypeError('f is %s, not a solver' % type(solver))
 
         ray_k = self.ray_k
-        ray_kx= self.ray_kx
-        ray_ky= self.ray_ky
-        ray_x= self.ray_x
-        ray_y= self.ray_y
-        ray_theta= self.ray_theta
+        ray_kx = self.ray_kx
+        ray_ky = self.ray_ky
+        ray_x = self.ray_x
+        ray_y = self.ray_y
+        ray_theta = self.ray_theta
         ray_cg = self.ray_cg
 
         U = self.U.data
