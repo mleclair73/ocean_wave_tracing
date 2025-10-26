@@ -64,6 +64,8 @@ class Wave_tracing():
         self.debug = DEBUG
 
         # Setting up X and Y domain
+        assert(domain_X0 < domain_XN) # condition for fast search
+        assert(domain_Y0 < domain_YN) # condition for fast search
         self.x = np.linspace(domain_X0, domain_XN, nx)
         self.y = np.linspace(domain_Y0, domain_YN, ny)
 
@@ -117,7 +119,7 @@ class Wave_tracing():
             t_velocity_field = U.time.data
             self.T0 = t_velocity_field[0]
             t_wr = np.arange(self.T0, self.T0+np.timedelta64(T,'s'),np.timedelta64(int(((T/nt)*1e3)),'ms'))
-            self.velocity_idt = np.array([self.find_nearest(t_velocity_field,t_wr[i]) for i in range(len(t_wr))])
+            self.velocity_idt = self.find_nearest_fast(t_velocity_field, t_wr)
 
         self.kwargs = kwargs
 
@@ -142,23 +144,6 @@ class Wave_tracing():
             logger.warning('Courant number is {}'.format(np.round(C,2)))
 
         self.C = C
-
-
-    def find_nearest(self,array, value):
-        """ Method finding nearest indices to a position in array
-
-        Args:
-            array: Array containg to be compared with the value
-            value (float): value to which index in array should be found
-
-        Returns:
-            idx (int): Index of the array which is closest to the value
-        """
-
-        array = np.asarray(array)
-        idx = (np.abs(array - value)).argmin()
-        return idx
-
 
     def c_intrinsic(self,k,d,group_velocity=False):
         """ Computing the intrinsic wave phase and group velocity according
@@ -387,6 +372,24 @@ class Wave_tracing():
         self.check_CFL(cg=np.nanmax(self.ray_cg[:,0]),max_speed=np.nanmax(np.sqrt(self.U**2+self.V**2)))
 
 
+    def find_nearest_fast(self, array, values):
+        """Fast nearest neighbor search for sorted arrays."""
+        assert(np.all(np.diff(array) >=0))
+        indices = np.searchsorted(array, values, side='left')
+        indices = np.clip(indices, 1, len(array) - 1)
+        
+        # Check if left or right neighbor is closer
+        left = indices - 1
+        right = indices
+        
+        indices = np.where(
+            np.abs(values - array[left]) < np.abs(values - array[right]),
+            left,
+            right
+        )
+        
+        return indices    
+    
     def solve(self, solver=RungeKutta4):
         """ Solve the geometrical optics equations numerically by means of the
             method of characteristics
@@ -424,10 +427,8 @@ class Wave_tracing():
         for n in range(0,nt-1):
 
             # find indices for each wave ray
-            idxs = np.array([self.find_nearest(x,xval) for xval in ray_x[:,n]])
-            idys = np.array([self.find_nearest(y,yval) for yval in ray_y[:,n]])
-
-            #ray_depth = self.d.isel(y=xa.DataArray(idys,dims='z'),x=xa.DataArray(idxs,dims='z'))
+            idxs = self.find_nearest_fast(x, ray_x[:, n])
+            idys = self.find_nearest_fast(y, ray_y[:, n])            
             ray_depth = self.d.values[idys,idxs]
 
             self.ray_depth[:,n] = ray_depth
@@ -490,9 +491,9 @@ class Wave_tracing():
         # Fill last values in ray_depth, ray_U, ray_V, and ray gradients
         ###
         # find indices for each wave ray
-        idxs = np.array([self.find_nearest(x,xval) for xval in ray_x[:,n+1]])
-        idys = np.array([self.find_nearest(y,yval) for yval in ray_y[:,n+1]])
-
+        idxs = self.find_nearest_fast(x, ray_x[:, n])  # All rays at once
+        idys = self.find_nearest_fast(y, ray_y[:, n])
+        
         self.ray_depth[:,n+1] =self.d.values[idys,idxs] 
 
         self.ray_U[:,n+1] = self.U.values[velocity_idt[n+1], idys, idxs]
