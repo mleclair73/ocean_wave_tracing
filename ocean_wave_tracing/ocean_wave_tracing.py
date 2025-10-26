@@ -621,13 +621,9 @@ class Wave_tracing():
             lons (2d): wave rays in longitude
             lats (2d): wave rays in latitude
         """
-        lats = np.zeros((self.nb_wave_rays,self.nt))
-        lons = np.zeros((self.nb_wave_rays,self.nt))
-        #print(pyproj.__dict__.keys())
-        for i in range(self.nb_wave_rays):
-            lons[i,:],lats[i,:] = pyproj.Transformer.from_proj(proj4,'epsg:4326', always_xy=True).transform(self.ray_x[i,:], self.ray_y[i,:])
-
-        return lons, lats
+        transformer = pyproj.Transformer.from_proj(proj4, 'epsg:4326', always_xy=True)
+        lons, lats = transformer.transform(self.ray_x.flatten(), self.ray_y.flatten())
+        return lons.reshape(self.ray_x.shape), lats.reshape(self.ray_y.shape)
     
     def get_ray_curvature(self,decomposed=False):
         """ Compute the approximate analytical ray curvature after Halsne and Li (2025, in rev.)
