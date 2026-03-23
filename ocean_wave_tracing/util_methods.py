@@ -118,7 +118,7 @@ def check_WKB_valitidy_depht(k,d,dx):
         dx (float): smallest grid spacing (i.e., in x- and y-direction)
 
     Returns:
-        criteria_xy (float): 2d field of the criteria (grad(d)/d|/k) in x- and y-direction
+        criteria (float): 2d field of the criteria (grad(d)/d|/k) in x- and y-direction
 
     """
 
@@ -127,4 +127,5 @@ def check_WKB_valitidy_depht(k,d,dx):
     grad_d_over_d = np.abs(np.gradient(d,dx,edge_order=1)/d)
     criteria = grad_d_over_d/k
 
-    return criteria_xy
+    return criteria
+
