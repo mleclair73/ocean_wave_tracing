@@ -106,3 +106,25 @@ def check_bathymetry(d,x,y):
                                 )
                         )
     return(d)
+
+def check_WKB_valitidy_depht(k,d,dx):
+    """
+    Method for checking the validity of the geometric optics approximation for depth-inuced 
+    refraction within the domain
+
+    Args:
+        k (float): wavenumber
+        d (float): 2d bathymetry field (increasing with positive values)
+        dx (float): smallest grid spacing (i.e., in x- and y-direction)
+
+    Returns:
+        criteria_xy (float): 2d field of the criteria (grad(d)/d|/k) in x- and y-direction
+
+    """
+
+    d[d<=0] = np.nan
+
+    grad_d_over_d = np.abs(np.gradient(d,dx,edge_order=1)/d)
+    criteria = grad_d_over_d/k
+
+    return criteria_xy
