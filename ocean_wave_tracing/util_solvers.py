@@ -1,4 +1,4 @@
-
+import numpy as np
 class Advection():
     #def set_variables(self, cg, k, kx, U):
     def __init__(self, cg, k, kx, U):
@@ -30,7 +30,9 @@ class WaveNumberEvolution():
         f = -(d_sigma + kx*dUkx + ky*dUky)
         return f
 
-
+# NOTE: This solve() method gets called every timestep for every ray; the
+# function-call delegation through ODESolver/RungeKutta4 is a measurable
+# fraction of the inner-loop cost — worth flattening if profiling demands.
 class ODESolver(object):
     """
     Based on the work by Langtangen, H.P. DOI = 10.1007/978-3-662-49887-3.
