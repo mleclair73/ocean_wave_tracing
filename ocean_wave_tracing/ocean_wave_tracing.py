@@ -65,8 +65,8 @@ class Wave_tracing():
         self.debug = DEBUG
 
         # Setting up X and Y domain
-        assert(domain_X0 < domain_XN) # condition for fast search
-        assert(domain_Y0 < domain_YN) # condition for fast search
+        assert(domain_X0 < domain_XN) # condition for fast search. This is sufficient because of the linspace
+        assert(domain_Y0 < domain_YN) # condition for fast search. This is sufficient because of the linspace
         self.x = np.linspace(domain_X0, domain_XN, nx)
         self.y = np.linspace(domain_Y0, domain_YN, ny)
 
