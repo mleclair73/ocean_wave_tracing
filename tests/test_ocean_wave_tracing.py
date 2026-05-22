@@ -167,6 +167,36 @@ def test_setting_initial_positions(my_wave):
     assert (my_wave.ray_x[:,0] == ipx).all()
     assert (my_wave.ray_y[:,0] == ipy).all()
 
+def test_ray_density_counts(my_wave):
+    """Vectorized ray_density should: (1) return a 2D heatmap that sums
+    to the number of in-domain ray samples, and (2) place each known
+    sample in its expected bin.
+    """
+    theta0 = 0.0
+    wave_period = 5
+    my_wave.set_initial_condition(wave_period=wave_period, theta0=theta0,
+                                  incoming_wave_side='left')
+    my_wave.solve()
+
+    xx, yy, hm = my_wave.ray_density(x_increment=4, y_increment=4)
+
+    # All ray samples lie inside the domain by construction, so the
+    # heatmap should account for every (ray, timestep) sample minus any
+    # that fall on the trailing edge (excluded by np.digitize).
+    total_samples = my_wave.nb_wave_rays * my_wave.nt
+    assert hm.sum() <= total_samples
+    assert hm.sum() > 0
+
+    # Drop a synthetic ray exactly inside a known bin and re-count.
+    my_wave.ray_x[:] = my_wave.x[2]
+    my_wave.ray_y[:] = my_wave.y[2]
+    _, _, hm2 = my_wave.ray_density(x_increment=4, y_increment=4)
+    # Every sample is now in the same bin; total count == n_rays*nt.
+    assert hm2.sum() == my_wave.nb_wave_rays * my_wave.nt
+    # And exactly one bin is non-zero.
+    assert np.count_nonzero(hm2) == 1
+
+
 def test_to_ds(my_wave):
 
     theta0 = np.pi

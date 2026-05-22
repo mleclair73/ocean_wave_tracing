@@ -710,25 +710,30 @@ class Wave_tracing():
         #>>> wt.solve()
         #>>> wt.ray_density(x_increment=20,y_increment=20)
         """
-        xx,yy=np.meshgrid(self.x[::x_increment],self.y[::y_increment])
-        hm = np.zeros(xx.shape) # heatmap
-        xs = xx[0]
-        ys = yy[:,0]
+        # Build grid
+        xs = self.x[::x_increment]
+        ys = self.y[::y_increment]
+        xx, yy = np.meshgrid(xs, ys)
 
-        counter=0
-        for i in range(0,self.nb_wave_rays):
-            for idx in range(len(xs)-1):
-                x0, xn = xs[idx],xs[idx+1]
-                for idy in range(len(ys)-1):
-                    y0, yn = ys[idy],ys[idy+1]
-                    counter+=1
-                    valid_x = (self.ray_x[i,:]>x0)*(self.ray_x[i,:]<xn)
-                    if (np.any((self.ray_y[i,:][valid_x]>y0)*(self.ray_y[i,:][valid_x]<yn))):
-                        hm[idy,idx]+=1
+        n_x_bins = len(xs) - 1
+        n_y_bins = len(ys) - 1
+
+        # Bin every (ray, timestep) sample with digitize; np.digitize
+        # returns 1-indexed bins with 0/len for out-of-range samples.
+        x_indices = np.digitize(self.ray_x.ravel(), xs) - 1
+        y_indices = np.digitize(self.ray_y.ravel(), ys) - 1
+
+        valid = (
+            (x_indices >= 0) & (x_indices < n_x_bins) &
+            (y_indices >= 0) & (y_indices < n_y_bins)
+        )
+        flat_indices = y_indices[valid] * n_x_bins + x_indices[valid]
+        hm = np.bincount(flat_indices, minlength=n_y_bins * n_x_bins)
+        hm = hm.reshape(n_y_bins, n_x_bins)
 
         if plot:
-            plt.pcolormesh(xx,yy,hm)
-            plt.colorbar()
+            plt.pcolormesh(xs, ys, hm, shading='flat')
+            plt.colorbar(label='Ray density')
             for i in range(0,self.nb_wave_rays):
                 plt.plot(self.ray_x[i,:],self.ray_y[i,:],'-r',alpha=0.3)
             plt.scatter(xx,yy);plt.show()
