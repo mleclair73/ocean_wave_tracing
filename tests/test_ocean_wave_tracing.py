@@ -102,6 +102,27 @@ def test_lat_lon(my_wave):
     assert lats[0,0] == true_lat
     assert lons[0,0] == true_lon
 
+
+def test_to_latlon_shape_and_values(my_wave):
+    """Vectorized to_latlon should preserve the (nb_rays, nt) shape and
+    match an element-wise pyproj transform."""
+    theta0 = 0
+    wave_period = 5
+    my_wave.set_initial_condition(wave_period=wave_period, theta0=theta0)
+    my_wave.solve()
+
+    proj4 = '+proj=stere +ellps=WGS84 +lat_0=90.0 +lat_ts=60.0 +x_0=3192800 +y_0=1784000 +lon_0=70'
+    lons, lats = my_wave.to_latlon(proj4)
+    assert lons.shape == my_wave.ray_x.shape
+    assert lats.shape == my_wave.ray_y.shape
+
+    transformer = pyproj.Transformer.from_proj(proj4, 'epsg:4326', always_xy=True)
+    expected_lon, expected_lat = transformer.transform(
+        my_wave.ray_x[2, 3], my_wave.ray_y[2, 3]
+    )
+    assert lons[2, 3] == pytest.approx(expected_lon)
+    assert lats[2, 3] == pytest.approx(expected_lat)
+
 def test_setting_initial_positions(my_wave):
 
     theta0 = np.pi*0.5
