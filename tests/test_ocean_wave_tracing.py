@@ -167,6 +167,55 @@ def test_setting_initial_positions(my_wave):
     assert (my_wave.ray_x[:,0] == ipx).all()
     assert (my_wave.ray_y[:,0] == ipy).all()
 
+def test_early_stop_deactivates_rays_leaving_domain():
+    """Rays launched from the right edge moving rightward must leave the
+    domain immediately. With early_stop=True they should be NaN-filled
+    and ray_active should be all-False (or near-all)."""
+    nx = ny = 40
+    nt = 50
+    T = 200
+    dx = dy = 50
+    U = np.zeros((ny, nx))
+    V = np.zeros((ny, nx))
+    d = np.ones((ny, nx)) * 1e5
+    wt = Wave_tracing(U, V, nx, ny, nt, T, dx, dy,
+                      nb_wave_rays=10,
+                      domain_X0=0, domain_XN=(nx-1)*dx,
+                      domain_Y0=0, domain_YN=(ny-1)*dy,
+                      temporal_evolution=False, T0=None, d=d)
+    wt.set_initial_condition(wave_period=8, theta0=0.0, incoming_wave_side='right')
+    wt.solve(early_stop=True)
+
+    assert hasattr(wt, 'ray_active')
+    assert not wt.ray_active.any()
+    # Final positions should be NaN for deactivated rays.
+    assert np.all(np.isnan(wt.ray_x[:, -1]))
+
+
+def test_early_stop_respects_min_depth():
+    """Rays that cross min_depth should deactivate before leaving the domain."""
+    nx = ny = 40
+    nt = 80
+    T = 800
+    dx = dy = 50
+    U = np.zeros((ny, nx))
+    V = np.zeros((ny, nx))
+    # Shallowing slope: depth drops from 100 to ~0 across x.
+    d = np.tile(np.linspace(100, 0.1, nx), (ny, 1))
+    wt = Wave_tracing(U, V, nx, ny, nt, T, dx, dy,
+                      nb_wave_rays=10,
+                      domain_X0=0, domain_XN=(nx-1)*dx,
+                      domain_Y0=0, domain_YN=(ny-1)*dy,
+                      temporal_evolution=False, T0=None, d=d)
+    wt.set_initial_condition(wave_period=8, theta0=0.0,
+                             incoming_wave_side='left', min_depth=20.0)
+    assert wt.min_depth == 20.0
+    wt.solve(early_stop=True)
+    # At least some rays should terminate before the final step.
+    nan_finals = np.isnan(wt.ray_x[:, -1])
+    assert nan_finals.any()
+
+
 def test_ray_density_counts(my_wave):
     """Vectorized ray_density should: (1) return a 2D heatmap that sums
     to the number of in-domain ray samples, and (2) place each known

@@ -59,6 +59,7 @@ class Wave_tracing():
         self.domain_Y0 = domain_Y0 # bottom
         self.domain_YN = domain_YN # top
         self.T = T
+        self.min_depth = 0.0
 
         self.temporal_evolution = temporal_evolution
         self.debug = DEBUG
@@ -404,6 +405,7 @@ class Wave_tracing():
                                             [left, right, top, bottom]
                 ipx (float, array of floats): initial position x
                 ipy (float, array of floats): initial position y
+                min_depth (float): depth threshold for early-stop in solve(early_stop=True)
         """
 
         nb_wave_rays = self.nb_wave_rays
@@ -496,10 +498,15 @@ class Wave_tracing():
         #Check the CFL condition
         self.check_CFL(cg=np.nanmax(self.ray_cg[:,0]),max_speed=np.nanmax(np.sqrt(self.U**2+self.V**2)))
 
+        if 'min_depth' in kwargs:
+            self.min_depth = kwargs['min_depth']
 
-    def solve(self, solver=RungeKutta4):
+
+    def solve(self, solver=RungeKutta4, early_stop=False):
         """ Solve the geometrical optics equations numerically by means of the
-            method of characteristics
+            method of characteristics. With early_stop=True, individual rays
+            are deactivated (positions filled with NaN going forward) the
+            moment they leave the domain or cross the min_depth threshold.
         """
 
         if not callable(solver):
@@ -536,6 +543,9 @@ class Wave_tracing():
 
         counter=0
         t = np.linspace(0,self.T,nt)
+
+        if early_stop:
+            ray_active = np.ones(self.nb_wave_rays, dtype=bool)
 
         for n in range(0,nt-1):
 
@@ -608,16 +618,50 @@ class Wave_tracing():
             #keep angles between 0 and 2pi
             ray_theta[:,n+1] = np.mod(ray_theta[:,n+1],(2*np.pi))
 
+            # Early stopping: deactivate rays that left the domain or hit land
+            if early_stop:
+                out_of_bounds = (
+                    (ray_x[:, n+1] < self.domain_X0) |
+                    (ray_x[:, n+1] > self.domain_XN) |
+                    (ray_y[:, n+1] < self.domain_Y0) |
+                    (ray_y[:, n+1] > self.domain_YN)
+                )
+                next_idxs = self.find_nearest_fast(x, np.clip(ray_x[:, n+1], self.domain_X0, self.domain_XN))
+                next_idys = self.find_nearest_fast(y, np.clip(ray_y[:, n+1], self.domain_Y0, self.domain_YN))
+                hit_land = self.d.values[next_idys, next_idxs] <= self.min_depth
+
+                newly_inactive = ray_active & (out_of_bounds | hit_land)
+                if np.any(newly_inactive):
+                    ray_active[newly_inactive] = False
+                    deactivated = np.where(newly_inactive)[0]
+                    ray_x[deactivated, n+1:] = np.nan
+                    ray_y[deactivated, n+1:] = np.nan
+                    ray_k[deactivated, n+1:] = np.nan
+                    ray_kx[deactivated, n+1:] = np.nan
+                    ray_ky[deactivated, n+1:] = np.nan
+                    ray_theta[deactivated, n+1:] = np.nan
+                    logger.info(
+                        f'Timestep {n}: deactivated {newly_inactive.sum()} rays. '
+                        f'{ray_active.sum()} still active.'
+                    )
+
+                if not ray_active.any():
+                    logger.info(f'All rays terminated by timestep {n+1}')
+                    break
+
             counter += 1
 
         ###
         # Fill last values in ray_depth, ray_U, ray_V, and ray gradients
         ###
-        # find indices for each wave ray
-        idxs = self.find_nearest_fast(x, ray_x[:, n+1])
-        idys = self.find_nearest_fast(y, ray_y[:, n+1])
+        # find indices for each wave ray (clip NaN positions from deactivated
+        # rays to the domain bounds; their final values get NaN'd below)
+        last_x = np.where(np.isfinite(ray_x[:, n+1]), ray_x[:, n+1], self.domain_X0)
+        last_y = np.where(np.isfinite(ray_y[:, n+1]), ray_y[:, n+1], self.domain_Y0)
+        idxs = self.find_nearest_fast(x, last_x)
+        idys = self.find_nearest_fast(y, last_y)
 
-        self.ray_depth[:,n+1] =self.d.values[idys,idxs] 
+        self.ray_depth[:,n+1] =self.d.values[idys,idxs]
 
         self.ray_U[:,n+1] = self.U.values[velocity_idt[n+1], idys, idxs]
         self.ray_V[:,n+1] = self.V.values[velocity_idt[n+1], idys, idxs]
@@ -650,6 +694,9 @@ class Wave_tracing():
         self.ray_y= ray_y
         self.ray_theta = ray_theta
         self.ray_cg = ray_cg
+        if early_stop:
+            self.ray_active = ray_active
+            logging.info(f'Final active rays: {ray_active.sum()}/{self.nb_wave_rays}')
         logging.info('Stoppet at time idt: {}'.format(velocity_idt[n]))
 
     def to_ds(self,**kwargs):
