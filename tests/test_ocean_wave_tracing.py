@@ -167,6 +167,26 @@ def test_setting_initial_positions(my_wave):
     assert (my_wave.ray_x[:,0] == ipx).all()
     assert (my_wave.ray_y[:,0] == ipy).all()
 
+def test_wave_vectorized_dispersion(my_wave):
+    """wave() must accept arrays for theta/d/U/V and return arrays whose
+    components reproduce the dispersion relation pointwise.
+    """
+    T = 8.0
+    thetas = np.array([0.0, np.pi/4, np.pi/2, np.pi])
+    depths = np.array([5.0, 50.0, 500.0, 1.0e5])
+    Us = np.array([0.0, 0.2, -0.3, 0.0])
+    Vs = np.array([0.0, 0.0, 0.1, 0.5])
+    k, kx, ky = my_wave.wave(T=T, theta=thetas, d=depths, U=Us, V=Vs)
+    assert k.shape == thetas.shape
+    # Check directional components.
+    np.testing.assert_allclose(kx, k*np.cos(thetas), rtol=1e-10)
+    np.testing.assert_allclose(ky, k*np.sin(thetas), rtol=1e-10)
+    # Check dispersion residual: sqrt(g*k*tanh(k*d)) + k*(cosT*U+sinT*V) = 2pi/T
+    g = my_wave.g
+    lhs = np.sqrt(g*k*np.tanh(k*depths)) + kx*Us + ky*Vs
+    np.testing.assert_allclose(lhs, (2*np.pi)/T, rtol=1e-6, atol=1e-8)
+
+
 def test_early_stop_deactivates_rays_leaving_domain():
     """Rays launched from the right edge moving rightward must leave the
     domain immediately. With early_stop=True they should be NaN-filled

@@ -81,7 +81,12 @@ class Wave_tracing():
         # Computing the horizontal gradients of the bathymetry
         self.dddx = self.d.differentiate(coord='x',edge_order=2)
         self.dddy = self.d.differentiate(coord='y',edge_order=2)
-        
+
+        # Cache numpy views for fast indexing in the inner solve loop
+        self.d_numpy = self.d.values
+        self.dddx_numpy = self.dddx.values
+        self.dddy_numpy = self.dddy.values
+
         # Computing the Hessian of the bathymetry
         self.ddd2x = self.dddx.differentiate(coord='x',edge_order=2)
         self.ddd2y = self.dddy.differentiate(coord='y',edge_order=2)
@@ -126,6 +131,10 @@ class Wave_tracing():
         # make xarray DataArray of velocity field
         self.U = check_velocity_field(U,temporal_evolution,x=self.x,y=self.y)
         self.V = check_velocity_field(V,temporal_evolution,x=self.x,y=self.y)
+
+        # Cache numpy views for fast indexing in the inner solve loop
+        self.U_numpy = self.U.values
+        self.V_numpy = self.V.values
 
         # Time
         self.dt = T/nt
@@ -221,15 +230,19 @@ class Wave_tracing():
                 flag
         """
 
-        g=self.g
-        dw_criteria = k*d>25
+        g = self.g
+        k = np.atleast_1d(k)
+        d = np.atleast_1d(d)
+        kd = k*d
 
-        if dw_criteria.all():
+        # Deep-water approximation when applicable; otherwise full formula.
+        if np.all(kd > 25):
             c_in = np.sqrt(g/k)
-            n=0.5
+            n = np.full_like(c_in, 0.5)
         else:
-            c_in = np.sqrt((g/k)*np.tanh(k*d)) #intrinsic
-            n = 0.5 * (1 + (2*k*d)/np.sinh(2*k*d))
+            tanh_kd = np.tanh(kd)
+            c_in = np.sqrt((g/k)*tanh_kd)
+            n = 0.5 * (1 + (2*kd)/np.sinh(2*kd))
 
         if group_velocity:
             return c_in*n
@@ -258,7 +271,7 @@ class Wave_tracing():
         #ray_depths = self.d.isel(y=xa.DataArray(idys,dims='z'),x=xa.DataArray(idxs,dims='z'))
         #nabla_d_rays = self.dddx.isel(y=xa.DataArray(idys,dims='z'),x=xa.DataArray(idxs,dims='z'))
         kd = k*ray_depths
-        nabla_d_rays = self.dddx.values[idys,idxs]
+        nabla_d_rays = self.dddx_numpy[idys,idxs]
         dsigma = 0.5*k*np.sqrt((self.g*k) / np.tanh(kd)) * (1-(np.tanh(kd))**2) *nabla_d_rays
         return dsigma
 
@@ -268,7 +281,7 @@ class Wave_tracing():
         """
 
         kd = k*ray_depths
-        nabla_d_rays = self.dddy.values[idys,idxs]
+        nabla_d_rays = self.dddy_numpy[idys,idxs]
         dsigma = 0.5*k*np.sqrt((self.g*k) / np.tanh(kd)) * (1-(np.tanh(kd))**2) *nabla_d_rays
         return dsigma
 
@@ -276,7 +289,7 @@ class Wave_tracing():
         """ Compute the phase speed gradient in x-direction 
         """
         kd = k*ray_depths
-        nabla_d_rays = self.dddx.values[idys,idxs]
+        nabla_d_rays = self.dddx_numpy[idys,idxs]
         nabla_c = 0.5*np.sqrt((self.g*k) / np.tanh(kd)) * (1-(np.tanh(kd))**2) *nabla_d_rays
         return nabla_c
         
@@ -285,7 +298,7 @@ class Wave_tracing():
         """ Compute the phase speed gradient in y-direction 
         """
         kd = k*ray_depths
-        nabla_d_rays = self.dddy.values[idys,idxs]
+        nabla_d_rays = self.dddy_numpy[idys,idxs]
         nabla_c = 0.5*np.sqrt((self.g*k) / np.tanh(kd)) * (1-(np.tanh(kd))**2) *nabla_d_rays
         return nabla_c
 
@@ -299,7 +312,7 @@ class Wave_tracing():
         C = ( (-2*T*k*(1-T**2)*np.sqrt(T)) - (k/np.sqrt(T))*(1-T**2)*(1-T**2) ) / T
         D = (1-T**2)/np.sqrt(T)
 
-        nabla_d_rays = self.dddx.values[idys,idxs]
+        nabla_d_rays = self.dddx_numpy[idys,idxs]
         nabla_d_2_rays = self.ddd2x.values[idys,idxs]
 
         cxx = alpha*C*(nabla_d_rays)**2 + alpha * D * nabla_d_2_rays
@@ -317,7 +330,7 @@ class Wave_tracing():
         C = ( (-2*T*k*(1-T**2)*np.sqrt(T)) - (k/np.sqrt(T))*(1-T**2)*(1-T**2) ) / T
         D = (1-T**2)/np.sqrt(T)
 
-        nabla_d_rays = self.dddy.values[idys,idxs]
+        nabla_d_rays = self.dddy_numpy[idys,idxs]
         nabla_d_2_rays = self.ddd2y.values[idys,idxs]
 
         cyy = alpha*C*(nabla_d_rays)**2 + alpha * D * nabla_d_2_rays
@@ -346,47 +359,66 @@ class Wave_tracing():
 
     def wave(self,T,theta,d,U=0,V=0):
         """ Method computing wave number from initial wave period.
-        Solving implicitly for the wave number k, with initial guess from the approximate
-        wave number according to Eckart (1952)
+        Vectorised Newton-Raphson solver for the dispersion relation
+            sqrt(g*k*tanh(k*d)) + k*(cos(theta)*U + sin(theta)*V) = 2*pi/T
+        with initial guess from Eckart (1952). Supports scalar or array
+        inputs for theta, d, U, V (broadcast together).
 
         Args:
             T (float): Wave period
-            theta (float): radians. Wave direction
-            d (float): water depth [m]
-            U (float): ambient current in x-direction [m/s]
-            V (float): ambient current in y-direction [m/s]
+            theta (float or array): radians. Wave direction
+            d (float or array): water depth [m]
+            U (float or array): ambient current in x-direction [m/s]
+            V (float or array): ambient current in y-direction [m/s]
 
 
         Returns:
-            k0 (float): wave number
-            ray_kx0 (float): wave number in x-direction
-            ray_ky0 (float): wave number in y-direction
+            k (float or array): wave number
+            kx (float or array): wave number in x-direction
+            ky (float or array): wave number in y-direction
         """
+        g = self.g
+        sigma_abs = (2*np.pi)/T
 
-        g=self.g
+        theta = np.asarray(theta, dtype=np.float64)
+        d = np.asarray(d, dtype=np.float64)
+        U = np.asarray(U, dtype=np.float64)
+        V = np.asarray(V, dtype=np.float64)
+        theta, d_b, U_b, V_b = np.broadcast_arrays(theta, d, U, V)
 
-        sigma = (2*np.pi)/T
-        k0 = (sigma**2)/g
+        cos_t = np.cos(theta)
+        sin_t = np.sin(theta)
+        current = cos_t*U_b + sin_t*V_b  # current projected onto wave direction
 
-        # approximation of wave number according to Eckart (1952)
-        alpha = k0*d
-        k_approx = (alpha/np.sqrt(np.tanh(alpha)))/d
+        # Eckart (1952) deep-water-adjusted initial guess
+        k0 = (sigma_abs**2)/g
+        alpha = k0*d_b
+        # Guard against tanh(alpha)=0 for d=0
+        with np.errstate(divide='ignore', invalid='ignore'):
+            k = np.where(d_b > 0, (alpha/np.sqrt(np.tanh(alpha)))/d_b, k0)
 
-        from scipy.optimize import fsolve
+        # Newton-Raphson on f(k) = sqrt(g*k*tanh(k*d)) + k*current - sigma_abs
+        for _ in range(20):
+            kd = k*d_b
+            tanh_kd = np.tanh(kd)
+            sech2 = 1.0 - tanh_kd**2
+            gkt = g*k*tanh_kd
+            sqrt_gkt = np.sqrt(np.where(gkt > 0, gkt, 1e-30))
+            f = sqrt_gkt + k*current - sigma_abs
+            # df/dk = (g*tanh(kd) + g*k*d*sech^2(kd)) / (2*sqrt(g*k*tanh(kd))) + current
+            f_prime = (g*tanh_kd + g*k*d_b*sech2)/(2*sqrt_gkt) + current
+            step = f/f_prime
+            k_new = k - step
+            if np.max(np.abs(step)) < 1e-12:
+                k = k_new
+                break
+            k = k_new
 
-        def k_imp(kk, d=d, g=g,T=T,U=U,V=V):
-            kx_ap = kk*np.cos(theta)
-            ky_ap = kk*np.sin(theta)
-            return (np.sqrt((g*kk * np.tanh(kk*d)))+ kx_ap*U + ky_ap*V ) - (2*np.pi)/T 
-        
-        
-        k = fsolve(k_imp,k_approx)
-        k = k.squeeze()
-
-        kx = k*np.cos(theta)
-        ky = k*np.sin(theta)
-        #logger.info('wave: {}, {},{}, and diff {}'.format(k,kx,ky,np.abs(k_approx)))
-        return k,kx,ky
+        kx = k*cos_t
+        ky = k*sin_t
+        if k.ndim == 0:
+            return float(k), float(kx), float(ky)
+        return k, kx, ky
 
 
     def set_initial_condition(self, wave_period, theta0,**kwargs):
@@ -481,16 +513,18 @@ class Wave_tracing():
             sys.exit()
 
 
-        # set inital wave properties
+        # set inital wave properties (vectorised lookup over all rays)
         logger.error(f'{self.velocity_idt}, {len(self.velocity_idt)}')
-        for i in range(nb_wave_rays):
-            self.ray_k[i,0], self.ray_kx[i,0], self.ray_ky[i,0] = self.wave(T=wave_period,
-                                                                theta=theta0[i],
-                                                                d=self.d.sel(y=ys[i],x=xs[i],method='nearest').values,
-                                                                U=self.U.isel(time=self.velocity_idt[0]).sel(y=ys[i],x=xs[i],method='nearest').values,
-                                                                V=self.V.isel(time=self.velocity_idt[0]).sel(y=ys[i],x=xs[i],method='nearest').values
-                                                                )
-            self.ray_cg[i,0] = self.c_intrinsic(k=self.ray_k[i,0],d=self.d.sel(y=ys[i],x=xs[i],method='nearest'),group_velocity=True)
+        idxs0 = self.find_nearest_fast(self.x, xs)
+        idys0 = self.find_nearest_fast(self.y, ys)
+        d0 = self.d_numpy[idys0, idxs0]
+        U0 = self.U_numpy[self.velocity_idt[0], idys0, idxs0]
+        V0 = self.V_numpy[self.velocity_idt[0], idys0, idxs0]
+        k_all, kx_all, ky_all = self.wave(T=wave_period, theta=theta0, d=d0, U=U0, V=V0)
+        self.ray_k[:, 0] = k_all
+        self.ray_kx[:, 0] = kx_all
+        self.ray_ky[:, 0] = ky_all
+        self.ray_cg[:, 0] = self.c_intrinsic(k=k_all, d=d0, group_velocity=True)
 
         # set inital wave propagation direction
         self.ray_theta[:,0] = theta0
@@ -520,10 +554,10 @@ class Wave_tracing():
         ray_theta= self.ray_theta
         ray_cg = self.ray_cg
 
-        U = self.U.data
-        V = self.V.data
+        U = self.U_numpy
+        V = self.V_numpy
 
-        #Compute velocity gradients
+        #Compute velocity gradients (xarray for downstream attrs, numpy for the hot loop)
         dudx = self.U.differentiate('x')
         dudy = self.U.differentiate('y')
         dvdx = self.V.differentiate('x')
@@ -534,6 +568,16 @@ class Wave_tracing():
         du_dxdy_2 = dudx.differentiate('y')
         dv_dxdy_2 = dvdx.differentiate('y')
         du_dy_2 = dudy.differentiate('y')
+
+        # Cache numpy views once so the inner loop avoids per-step .values
+        dudx_np = dudx.values
+        dudy_np = dudy.values
+        dvdx_np = dvdx.values
+        dvdy_np = dvdy.values
+        dv_dx_2_np = dv_dx_2.values
+        du_dxdy_2_np = du_dxdy_2.values
+        dv_dxdy_2_np = dv_dxdy_2.values
+        du_dy_2_np = du_dy_2.values
 
         x = self.x
         y = self.y
@@ -553,30 +597,29 @@ class Wave_tracing():
             idxs = self.find_nearest_fast(x, ray_x[:, n])
             idys = self.find_nearest_fast(y, ray_y[:, n])
 
-            #ray_depth = self.d.isel(y=xa.DataArray(idys,dims='z'),x=xa.DataArray(idxs,dims='z'))
-            ray_depth = self.d.values[idys,idxs]
+            ray_depth = self.d_numpy[idys,idxs]
+            vid = velocity_idt[n]
 
             self.ray_depth[:,n] = ray_depth
 
-            self.ray_U[:,n] = self.U.values[velocity_idt[n], idys, idxs]
-            self.ray_V[:,n] = self.V.values[velocity_idt[n], idys, idxs]
+            self.ray_U[:,n] = U[vid, idys, idxs]
+            self.ray_V[:,n] = V[vid, idys, idxs]
 
-            self.ray_dudx[:,n] = dudx.values[velocity_idt[n], idys, idxs]
-            self.ray_dvdy[:,n] = dvdy.values[velocity_idt[n], idys, idxs]
-            self.ray_dudy[:,n] = dudy.values[velocity_idt[n], idys, idxs]
-            self.ray_dvdx[:,n] = dvdx.values[velocity_idt[n], idys, idxs]
-            #logger.info() # CHECK FOR BOTH U AND V
-            
+            self.ray_dudx[:,n] = dudx_np[vid, idys, idxs]
+            self.ray_dvdy[:,n] = dvdy_np[vid, idys, idxs]
+            self.ray_dudy[:,n] = dudy_np[vid, idys, idxs]
+            self.ray_dvdx[:,n] = dvdx_np[vid, idys, idxs]
+
             self.d_cx[:,n] = self.grad_c_x(ray_k[:,n], idxs, idys, ray_depth)
             self.d_cy[:,n] = self.grad_c_y(ray_k[:,n], idxs, idys, ray_depth)
 
             self.dd_cxx[:,n] = self.c_xx(ray_k[:,n], idxs, idys, ray_depth)
             self.dd_cyy[:,n] = self.c_yy(ray_k[:,n], idxs, idys, ray_depth)
             self.dd_cxy[:,n] = self.c_xy(ray_k[:,n], idxs, idys, ray_depth)
-            self.ray_dvdx_2[:,n] = dv_dx_2.values[velocity_idt[n], idys, idxs]
-            self.ray_dudy_2[:,n] = du_dy_2.values[velocity_idt[n], idys, idxs]
-            self.ray_du2_dxdy[:,n] = du_dxdy_2.values[velocity_idt[n], idys, idxs]
-            self.ray_dv2_dxdy[:,n] = dv_dxdy_2.values[velocity_idt[n], idys, idxs]
+            self.ray_dvdx_2[:,n] = dv_dx_2_np[vid, idys, idxs]
+            self.ray_dudy_2[:,n] = du_dy_2_np[vid, idys, idxs]
+            self.ray_du2_dxdy[:,n] = du_dxdy_2_np[vid, idys, idxs]
+            self.ray_dv2_dxdy[:,n] = dv_dxdy_2_np[vid, idys, idxs]
 
             #======================================================
             ### numerical integration of the wave ray equations ###
@@ -586,10 +629,10 @@ class Wave_tracing():
             ray_cg[:,n] = self.c_intrinsic(ray_k[:,n],d=ray_depth,group_velocity=True)
 
             # ADVECTION
-            f_adv = Advection(cg=ray_cg[:,n], k=ray_k[:,n], kx=ray_kx[:,n], U=U[velocity_idt[n],idys,idxs])
+            f_adv = Advection(cg=ray_cg[:,n], k=ray_k[:,n], kx=ray_kx[:,n], U=U[vid,idys,idxs])
             ray_x[:,n+1] = solver.advance(u=ray_x[:,n], f=f_adv,k=n,t=t) # NOTE: this k is a counter and not wave number
 
-            f_adv = Advection(cg=ray_cg[:,n], k=ray_k[:,n], kx=ray_ky[:,n], U=V[velocity_idt[n],idys,idxs])
+            f_adv = Advection(cg=ray_cg[:,n], k=ray_k[:,n], kx=ray_ky[:,n], U=V[vid,idys,idxs])
             ray_y[:,n+1] = solver.advance(u=ray_y[:,n], f=f_adv, k=n, t=t)# NOTE: this k is a counter and not wave number
 
 
@@ -661,17 +704,16 @@ class Wave_tracing():
         idxs = self.find_nearest_fast(x, last_x)
         idys = self.find_nearest_fast(y, last_y)
 
-        self.ray_depth[:,n+1] =self.d.values[idys,idxs]
+        self.ray_depth[:,n+1] = self.d_numpy[idys,idxs]
 
-        self.ray_U[:,n+1] = self.U.values[velocity_idt[n+1], idys, idxs]
-        self.ray_V[:,n+1] = self.V.values[velocity_idt[n+1], idys, idxs]
-        #self.ray_U[:,n+1] = self.U.isel(time=velocity_idt[n+1], y=xa.DataArray(idys,dims='z'),x=xa.DataArray(idxs,dims='z'))
-        #self.ray_V[:,n+1] = self.V.isel(time=velocity_idt[n+1], y=xa.DataArray(idys,dims='z'),x=xa.DataArray(idxs,dims='z'))
-        
-        self.ray_dudx[:,n+1] = dudx.values[velocity_idt[n+1], idys, idxs]
-        self.ray_dvdy[:,n+1] = dvdy.values[velocity_idt[n+1], idys, idxs]
-        self.ray_dudy[:,n+1] = dudy.values[velocity_idt[n+1], idys, idxs]
-        self.ray_dvdx[:,n+1] = dvdx.values[velocity_idt[n+1], idys, idxs]
+        vid_last = velocity_idt[n+1]
+        self.ray_U[:,n+1] = U[vid_last, idys, idxs]
+        self.ray_V[:,n+1] = V[vid_last, idys, idxs]
+
+        self.ray_dudx[:,n+1] = dudx_np[vid_last, idys, idxs]
+        self.ray_dvdy[:,n+1] = dvdy_np[vid_last, idys, idxs]
+        self.ray_dudy[:,n+1] = dudy_np[vid_last, idys, idxs]
+        self.ray_dvdx[:,n+1] = dvdx_np[vid_last, idys, idxs]
         
         self.dsigma_dx[:,n+1] = self.dsigma_x(ray_k[:,n+1], idxs, idys,self.ray_depth[:,n+1])
         self.dsigma_dy[:,n+1] = self.dsigma_y(ray_k[:,n+1], idxs, idys,self.ray_depth[:,n+1])
