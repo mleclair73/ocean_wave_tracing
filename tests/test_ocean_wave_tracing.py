@@ -91,6 +91,16 @@ def test_find_nearest(my_wave):
     assert my_wave.find_nearest(test_array,test_value) == 3
 
 
+def test_find_nearest_fast_matches_find_nearest(my_wave):
+    """find_nearest_fast must match find_nearest on a sorted array, and
+    must accept a vector of queries returning a vector of indices."""
+    sorted_arr = np.linspace(0, 100, 101)
+    queries = np.array([-5.0, 0.4, 17.2, 50.0, 99.9, 200.0])
+    fast = my_wave.find_nearest_fast(sorted_arr, queries)
+    expected = np.array([my_wave.find_nearest(sorted_arr, q) for q in queries])
+    np.testing.assert_array_equal(fast, expected)
+
+
 def test_lat_lon(my_wave):
     theta0 = 0
     wave_period = 5
